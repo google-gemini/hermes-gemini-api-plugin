@@ -80,7 +80,7 @@ PYTHONPATH=/path/to/hermes-agent python -m hermes_cli.main plugins validate .
 
 ## Acknowledgments
 
-Built upon the initial Gemini image generation provider implementation by Wesley Simplicio ([@wesleysimplicio](https://github.com/wesleysimplicio)) in [NousResearch/hermes-agent#97576](https://github.com/NousResearch/hermes-agent/pull/97576), review feedback from [@teknium1](https://github.com/teknium1) in [NousResearch/hermes-agent#120851](https://github.com/NousResearch/hermes-agent/pull/120851), and standalone plugin extraction work by [@semirkabir](https://github.com/semirkabir) in [NousResearch/hermes-agent#127068](https://github.com/NousResearch/hermes-agent/pull/127068). See [NOTICE](NOTICE) for full third-party license details.
+Built upon the initial Gemini image generation provider implementation by Wesley Simplicio ([@wesleysimplicio](https://github.com/wesleysimplicio)) in [NousResearch/hermes-agent#97576](https://github.com/NousResearch/hermes-agent/pull/97576), review feedback from [@teknium1](https://github.com/teknium1) in [NousResearch/hermes-agent#120851](https://github.com/NousResearch/hermes-agent/pull/120851), and standalone plugin extraction work by [@semirkabir](https://github.com/semirkabir) in [NousResearch/hermes-agent#127068](https://github.com/NousResearch/hermes-agent/pull/127068).
 
 ## Disclaimer
 
