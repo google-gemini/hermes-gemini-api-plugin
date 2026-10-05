@@ -212,7 +212,7 @@ def _resolve_image_size(
         return None
     cfg = load_image_gen_config("gemini") if cfg is None else cfg
     for candidate in (
-        "2K" if upscale and "2K" in supported else ("4K" if upscale and "4K" in supported else None),
+        "4K" if upscale and "4K" in supported else ("2K" if upscale and "2K" in supported else None),
         cfg.get("image_size") or cfg.get("resolution"),
     ):
         if isinstance(candidate, str) and candidate.strip():
@@ -289,7 +289,7 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
         # base64 inflates ~4/3, so the encoded length bounds the decode before it allocates.
         if len(b64) > (_MAX_INPUT_IMAGE_BYTES // 3) * 4 + 4:
             raise ValueError(f"Image data URI {_cap_message('data:')}")
-        raw = base64.b64decode(b64, validate=True)
+        raw = base64.b64decode(b64)
         if len(raw) > _MAX_INPUT_IMAGE_BYTES:
             raise ValueError(f"Image data URI {_cap_message('data:')}")
         return raw, _sniff_mime(raw)
@@ -297,8 +297,10 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
 
     raise_if_read_blocked(ref)
     path = Path(os.path.expanduser(ref))
+    if not path.is_file():
+        raise ValueError(f"Image input path is not a regular file or does not exist: {ref}")
     # stat() first so an oversized file is refused without reading it into memory.
-    if path.is_file() and path.stat().st_size > _MAX_INPUT_IMAGE_BYTES:
+    if path.stat().st_size > _MAX_INPUT_IMAGE_BYTES:
         raise ValueError(f"Image input path {_cap_message(ref)}")
     raw = path.read_bytes()
     if len(raw) > _MAX_INPUT_IMAGE_BYTES:
