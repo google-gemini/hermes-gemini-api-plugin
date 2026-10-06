@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Google AI Studio Gemini image generation (Nano Banana 2 / Lite / Pro);
+"""Google AI Studio Gemini image generation (Nano Banana 2.1, Nano Banana 2, Nano Banana 2 Lite, and Nano Banana Pro);
 base64 inlineData → image cache. Selection: the caller's ``model`` (honoured only when it names a
 catalog entry) → ``GEMINI_IMAGE_MODEL`` → ``image_gen.gemini.model`` → :data:`DEFAULT_MODEL`. The
 shared top-level ``image_gen.model`` is deliberately NOT honoured: it is provider-agnostic and may
@@ -45,7 +45,7 @@ from plugins.image_gen._common import (
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-DEFAULT_MODEL = "gemini-3.1-flash-image"
+DEFAULT_MODEL = "gemini-nano-banana-2.1"
 
 _ASPECT_RATIOS = {"landscape": "16:9", "square": "1:1", "portrait": "9:16"}
 _GEMINI_RATIOS_10 = (
@@ -68,10 +68,20 @@ _MIME_TO_EXT = {
 }
 
 MODELS: Dict[str, Dict[str, Any]] = {
+    "gemini-nano-banana-2.1": {
+        "display": "Nano Banana 2.1 (Gemini Nano Banana 2.1)",
+        "speed": "Fast",
+        "strengths": "Best balance — 14 aspect ratios, 1K/2K/4K resolution, Google Web and Image Search grounding, up to 14 refs",
+        "api_model": "gemini-nano-banana-2.1",
+        "aspect_ratios": _GEMINI_RATIOS_14,
+        "resolutions": ("1K", "2K", "4K"),
+        "supports_search": True,
+        "max_refs": 14,
+    },
     "gemini-3.1-flash-image": {
         "display": "Nano Banana 2 (Gemini 3.1 Flash Image)",
         "speed": "Fast",
-        "strengths": "Best balance — 14 aspect ratios, 512/1K/2K/4K resolution, Google Search, up to 14 refs",
+        "strengths": "Previous generation — 14 aspect ratios, 512/1K/2K/4K resolution, Google Web and Image Search grounding, up to 14 refs",
         "api_model": "gemini-3.1-flash-image",
         "aspect_ratios": _GEMINI_RATIOS_14,
         "resolutions": ("512", "1K", "2K", "4K"),
@@ -380,10 +390,10 @@ def _extract_inline_image(body: Dict[str, Any]) -> Tuple[Optional[Tuple[str, str
 def _usage_from_gemini_metadata(usage_meta: Dict[str, Any]) -> SimpleNamespace:
     """Gemini's camelCase ``usageMetadata`` → the snake_case shape ``record_token_usage`` reads.
 
-    ``thoughtsTokenCount`` is folded into the completion count. Nano Banana Pro reasons before it
-    draws, and ``totalTokenCount`` already counts those tokens, so omitting them records a row
-    where prompt + completion does not reconcile with the total — on a pro image call the
-    shortfall is most of the billed work. Core's converter still leaves them out (upstream
+    ``thoughtsTokenCount`` is folded into the completion count. Nano Banana 2.1 and Nano Banana Pro
+    reason before they draw, and ``totalTokenCount`` already counts those tokens, so omitting them
+    records a row where prompt + completion does not reconcile with the total — on a thinking image
+    call the shortfall is most of the billed work. Core's converter still leaves them out (upstream
     #103002 / #103205 propose the same fix there); this is a deliberate, local divergence rather
     than a fork of core behaviour.
     """

@@ -102,12 +102,17 @@ class TestMetadata:
         assert provider.name == "gemini"
 
     def test_default_model(self, provider):
-        assert provider.default_model() == "gemini-3.1-flash-image"
+        assert provider.default_model() == "gemini-nano-banana-2.1"
 
     def test_picker_matches_resolvable_catalog(self, provider):
         ids = [m["id"] for m in provider.list_models()]
         assert set(ids) == set(provider.models)
-        assert set(ids) == {"gemini-3.1-flash-image", "gemini-3.1-flash-lite-image", "gemini-3-pro-image"}
+        assert set(ids) == {
+            "gemini-nano-banana-2.1",
+            "gemini-3.1-flash-image",
+            "gemini-3.1-flash-lite-image",
+            "gemini-3-pro-image",
+        }
         assert provider.default_model() in ids
 
     def test_catalog_entries_have_display_speed_strengths(self, provider):
@@ -161,7 +166,7 @@ class TestModelResolution:
         # When only a foreign top-level model is set, fallback to DEFAULT_MODEL
         (tmp_path / "config.yaml").write_text(yaml.safe_dump({"image_gen": {"model": "gpt-image-2-medium"}}))
         model_id, _ = gemini_plugin._resolve_model()
-        assert model_id == "gemini-3.1-flash-image"
+        assert model_id == "gemini-nano-banana-2.1"
 
 
 # ── Endpoint / credential routing ───────────────────────────────────────────
@@ -229,7 +234,7 @@ class TestGenerate:
             result = provider.generate("a cute nano banana", aspect_ratio="landscape")
 
         assert result["success"] is True
-        assert result["model"] == "gemini-3.1-flash-image"
+        assert result["model"] == "gemini-nano-banana-2.1"
         assert result["aspect_ratio"] == "landscape"
         assert result["exact_aspect_ratio"] == "16:9"
         assert result["provider"] == "gemini"
@@ -242,7 +247,7 @@ class TestGenerate:
         assert saved.read_bytes() == png_bytes
 
         called_url = mock_post.call_args.args[0]
-        assert called_url == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent"
+        assert called_url == "https://generativelanguage.googleapis.com/v1beta/models/gemini-nano-banana-2.1:generateContent"
         assert "key=" not in called_url
         assert mock_post.call_args.kwargs["headers"]["x-goog-api-key"] == "AIza-test-key"
         assert mock_post.call_args.kwargs["json"]["generationConfig"]["imageConfig"] == {"aspectRatio": "16:9"}
@@ -277,11 +282,11 @@ class TestGenerate:
             assert "I cannot generate that image" in result["error"]
         ((session_id, task), kwargs), = recorded
         assert (session_id, task) == ("sess-gemini-1", "image_generation")
-        assert (kwargs["model"], kwargs["billing_provider"]) == ("gemini-3.1-flash-image", "gemini")
+        assert (kwargs["model"], kwargs["billing_provider"]) == ("gemini-nano-banana-2.1", "gemini")
         assert (kwargs["input_tokens"], kwargs["output_tokens"]) == (42, 1290)
 
     def test_thinking_tokens_counted_as_output(self, provider):
-        """Nano Banana Pro reasons before it draws, and ``totalTokenCount`` bills those tokens, so
+        """Nano Banana 2.1 and Nano Banana Pro reason before they draw, and ``totalTokenCount`` bills those tokens, so
         they belong in the output count — otherwise the row does not reconcile with the total."""
         from agent import aux_accounting
 
@@ -308,8 +313,12 @@ class TestGenerate:
 
     @pytest.mark.parametrize(
         "model_id,expected_upscale",
-        [("gemini-3.1-flash-image", True), ("gemini-3.1-flash-lite-image", False),
-         ("gemini-3-pro-image", True)],
+        [
+            ("gemini-nano-banana-2.1", True),
+            ("gemini-3.1-flash-image", True),
+            ("gemini-3.1-flash-lite-image", False),
+            ("gemini-3-pro-image", True),
+        ],
     )
     def test_upscale_advertised_only_when_model_has_a_rung_above_1k(
         self, provider, monkeypatch, model_id, expected_upscale
@@ -400,19 +409,20 @@ class TestGenerate:
         assert "tools" not in sent
 
     @pytest.mark.parametrize(
-        "model_id,expected_wire_ratio,expected_search",
+        "model_id,expected_wire_ratio,expected_search,expected_512_size",
         [
-            ("gemini-3.1-flash-image", "1:4", True),
-            ("gemini-3.1-flash-lite-image", "16:9", False),
-            ("gemini-3-pro-image", "16:9", True),
+            ("gemini-nano-banana-2.1", "1:4", True, None),
+            ("gemini-3.1-flash-image", "1:4", True, "512"),
+            ("gemini-3.1-flash-lite-image", "16:9", False, None),
+            ("gemini-3-pro-image", "16:9", True, None),
         ],
     )
     def test_per_model_gating_for_extreme_aspect_ratios_and_google_search(
-        self, provider, tmp_path, model_id, expected_wire_ratio, expected_search
+        self, provider, tmp_path, model_id, expected_wire_ratio, expected_search, expected_512_size
     ):
-        # Grounding is configured via image_gen.gemini.google_search in config.yaml.
+        # Grounding and 512px resolution are gated per model via MODELS metadata.
         (tmp_path / "config.yaml").write_text(
-            yaml.safe_dump({"image_gen": {"gemini": {"google_search": True}}})
+            yaml.safe_dump({"image_gen": {"gemini": {"google_search": True, "image_size": "512"}}})
         )
         with patch("requests.post", return_value=_fake_http_response(_gemini_payload(b64=_b64_png()))) as mock_post:
             result = provider.generate("panoramic poster", aspect_ratio="1:4", model=model_id)
@@ -420,8 +430,10 @@ class TestGenerate:
         assert result["success"] is True
         assert result["exact_aspect_ratio"] == expected_wire_ratio
         assert result.get("google_search", False) is expected_search
+        assert result.get("image_size") == expected_512_size
         sent = mock_post.call_args.kwargs["json"]
         assert sent["generationConfig"]["imageConfig"]["aspectRatio"] == expected_wire_ratio
+        assert sent["generationConfig"]["imageConfig"].get("imageSize") == expected_512_size
         assert ("tools" in sent) is expected_search
 
     def test_reference_images_over_total_request_limit_rejected(self, provider, monkeypatch, tmp_path):
