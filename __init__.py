@@ -1,5 +1,16 @@
 # Copyright 2026 Google LLC
-# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Google AI Studio Gemini image generation (Nano Banana 2 / Lite / Pro);
 base64 inlineData → image cache. Selection: the caller's ``model`` (honoured only when it names a
@@ -286,10 +297,11 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
         _, sep, b64 = ref.partition(",")
         if not sep:
             raise ValueError("image data URI is missing its payload")
+        b64 = "".join(b64.split())
         # base64 inflates ~4/3, so the encoded length bounds the decode before it allocates.
         if len(b64) > (_MAX_INPUT_IMAGE_BYTES // 3) * 4 + 4:
             raise ValueError(f"Image data URI {_cap_message('data:')}")
-        raw = base64.b64decode(b64)
+        raw = base64.b64decode(b64, validate=True)
         if len(raw) > _MAX_INPUT_IMAGE_BYTES:
             raise ValueError(f"Image data URI {_cap_message('data:')}")
         return raw, _sniff_mime(raw)
