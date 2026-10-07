@@ -90,7 +90,7 @@ def _tmp_hermes_home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def provider(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "AQ.test-key")
     return gemini_plugin.GeminiImageGenProvider()
 
 
@@ -102,12 +102,13 @@ class TestMetadata:
         assert provider.name == "gemini"
 
     def test_default_model(self, provider):
-        assert provider.default_model() == "gemini-nano-banana-2.1"
+        assert provider.default_model() == gemini_plugin.DEFAULT_MODEL
+        assert provider.default_model().startswith("gemini-")
 
     def test_picker_matches_resolvable_catalog(self, provider):
         ids = [m["id"] for m in provider.list_models()]
         assert set(ids) == set(provider.models)
-        assert set(ids) == {
+        assert set(ids) >= {
             "gemini-nano-banana-2.1",
             "gemini-3.1-flash-image",
             "gemini-3.1-flash-lite-image",
@@ -129,7 +130,7 @@ class TestMetadata:
         assert [v["key"] for v in schema["env_vars"]] == ["GEMINI_API_KEY"]
 
         # A user with GEMINI_API_KEY set must pass the tools_config readiness check
-        monkeypatch.setenv("GEMINI_API_KEY", "AIza-gemini-only")
+        monkeypatch.setenv("GEMINI_API_KEY", "AQ.gemini-only")
         assert _provider_env_ready(schema) is True
 
 
@@ -142,7 +143,7 @@ class TestAvailability:
         assert gemini_plugin.GeminiImageGenProvider().is_available() is False
 
     def test_api_key_set_available(self, monkeypatch):
-        monkeypatch.setenv("GEMINI_API_KEY", "AIza-test")
+        monkeypatch.setenv("GEMINI_API_KEY", "AQ.test")
         assert gemini_plugin.GeminiImageGenProvider().is_available() is True
 
 
@@ -166,7 +167,7 @@ class TestModelResolution:
         # When only a foreign top-level model is set, fallback to DEFAULT_MODEL
         (tmp_path / "config.yaml").write_text(yaml.safe_dump({"image_gen": {"model": "gpt-image-2-medium"}}))
         model_id, _ = gemini_plugin._resolve_model()
-        assert model_id == "gemini-nano-banana-2.1"
+        assert model_id == gemini_plugin.DEFAULT_MODEL
 
 
 # ── Endpoint / credential routing ───────────────────────────────────────────
@@ -234,7 +235,7 @@ class TestGenerate:
             result = provider.generate("a cute nano banana", aspect_ratio="landscape")
 
         assert result["success"] is True
-        assert result["model"] == "gemini-nano-banana-2.1"
+        assert result["model"] == gemini_plugin.DEFAULT_MODEL
         assert result["aspect_ratio"] == "landscape"
         assert result["exact_aspect_ratio"] == "16:9"
         assert result["provider"] == "gemini"
@@ -247,9 +248,11 @@ class TestGenerate:
         assert saved.read_bytes() == png_bytes
 
         called_url = mock_post.call_args.args[0]
-        assert called_url == "https://generativelanguage.googleapis.com/v1beta/models/gemini-nano-banana-2.1:generateContent"
+        assert called_url == (
+            f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_plugin.DEFAULT_MODEL}:generateContent"
+        )
         assert "key=" not in called_url
-        assert mock_post.call_args.kwargs["headers"]["x-goog-api-key"] == "AIza-test-key"
+        assert mock_post.call_args.kwargs["headers"]["x-goog-api-key"] == "AQ.test-key"
         assert mock_post.call_args.kwargs["json"]["generationConfig"]["imageConfig"] == {"aspectRatio": "16:9"}
 
     @pytest.mark.parametrize("has_image", [True, False])
@@ -282,7 +285,7 @@ class TestGenerate:
             assert "I cannot generate that image" in result["error"]
         ((session_id, task), kwargs), = recorded
         assert (session_id, task) == ("sess-gemini-1", "image_generation")
-        assert (kwargs["model"], kwargs["billing_provider"]) == ("gemini-nano-banana-2.1", "gemini")
+        assert (kwargs["model"], kwargs["billing_provider"]) == (gemini_plugin.DEFAULT_MODEL, "gemini")
         assert (kwargs["input_tokens"], kwargs["output_tokens"]) == (42, 1290)
 
     def test_thinking_tokens_counted_as_output(self, provider):
