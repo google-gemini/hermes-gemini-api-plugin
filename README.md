@@ -2,13 +2,14 @@
 
 Native Google AI Studio Gemini (**Nano Banana**) image generation and editing backend plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Calls the Gemini REST endpoint (`POST /v1beta/models/{model}:generateContent` with `responseModalities: ["TEXT", "IMAGE"]`), decodes returned `inlineData` images into `$HERMES_HOME/cache/generated/images/`, and records token usage (including Nano Banana Pro thinking tokens) into Hermes session accounting.
+Calls the Gemini REST endpoint (`POST /v1beta/models/{model}:generateContent` with `responseModalities: ["TEXT", "IMAGE"]`), decodes returned `inlineData` images into `$HERMES_HOME/cache/generated/images/`, and records token usage (including Nano Banana 2.1 and Nano Banana Pro thinking tokens) into Hermes session accounting.
 
 ## Supported Models
 
 | Model ID | Display Name | Speed | Capabilities |
 | :--- | :--- | :--- | :--- |
-| `gemini-3.1-flash-image` *(default)* | **Nano Banana 2** (Gemini 3.1 Flash Image) | Fast | 14 aspect ratios (including `1:4`, `4:1`, `1:8`, `8:1`), `512` / `1K` / `2K` / `4K` output resolution, Google Search grounding, up to 14 reference images |
+| `gemini-nano-banana-2.1` *(default)* | **Nano Banana 2.1** (Gemini Nano Banana 2.1) | Fast | 14 aspect ratios (including `1:4`, `4:1`, `1:8`, `8:1`), `1K` / `2K` / `4K` output resolution, Google Web and Image Search grounding, up to 14 reference images |
+| `gemini-3.1-flash-image` | **Nano Banana 2** (Gemini 3.1 Flash Image) | Fast | 14 aspect ratios (including `1:4`, `4:1`, `1:8`, `8:1`), `512` / `1K` / `2K` / `4K` output resolution, Google Web and Image Search grounding, up to 14 reference images |
 | `gemini-3.1-flash-lite-image` | **Nano Banana 2 Lite** (Gemini 3.1 Flash Lite Image) | Fastest | Lowest latency & cost; 10 aspect ratios, `1K` output resolution, up to 14 reference images |
 | `gemini-3-pro-image` | **Nano Banana Pro** (Gemini 3 Pro Image) | Slower | Highest fidelity & reasoning; 10 aspect ratios, `1K` / `2K` / `4K` output resolution, Google Search grounding, up to 14 reference images |
 
@@ -44,8 +45,8 @@ Select `gemini` as your image generation provider (or run `hermes tools` → **I
 image_gen:
   provider: gemini
   gemini:
-    model: gemini-3.1-flash-image   # or gemini-3.1-flash-lite-image, gemini-3-pro-image
-    image_size: 2K                  # 512 | 1K | 2K | 4K (model-dependent)
+    model: gemini-nano-banana-2.1   # or gemini-3.1-flash-image, gemini-3.1-flash-lite-image, gemini-3-pro-image
+    image_size: 2K                  # 1K | 2K | 4K (or 512 on gemini-3.1-flash-image)
     aspect_ratio: "16:9"            # exact ratio override (e.g. 1:1, 16:9, 9:16, 21:9, 1:4, 4:1, 1:8, 8:1)
     google_search: false            # enable Google Search grounding on supported models
     # Optional custom endpoint / credential routing:
@@ -80,8 +81,8 @@ PYTHONPATH=/path/to/hermes-agent python -m hermes_cli.main plugins validate .
 
 ## Acknowledgments
 
-Built upon the initial Gemini image generation provider implementation by Wesley Simplicio ([@wesleysimplicio](https://github.com/wesleysimplicio)) in [NousResearch/hermes-agent#97576](https://github.com/NousResearch/hermes-agent/pull/97576), review feedback from [@teknium1](https://github.com/teknium1) in [NousResearch/hermes-agent#120851](https://github.com/NousResearch/hermes-agent/pull/120851), and standalone plugin extraction work by [@semirkabir](https://github.com/semirkabir) in [NousResearch/hermes-agent#127068](https://github.com/NousResearch/hermes-agent/pull/127068). See [NOTICE](NOTICE) for full third-party license details.
+Built upon the initial Gemini image generation provider implementation by Wesley Simplicio ([@wesleysimplicio](https://github.com/wesleysimplicio)) in [NousResearch/hermes-agent#97576](https://github.com/NousResearch/hermes-agent/pull/97576), review feedback from [@teknium1](https://github.com/teknium1) in [NousResearch/hermes-agent#120851](https://github.com/NousResearch/hermes-agent/pull/120851), and standalone plugin extraction work by [@semirkabir](https://github.com/semirkabir) in [NousResearch/hermes-agent#127068](https://github.com/NousResearch/hermes-agent/pull/127068).
 
 ## Disclaimer
 
-This is not an officially supported Google product. This project is not eligible for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security).
+This is not an officially supported Google product. This project is not eligible for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security). Use of the Gemini API is subject to the [Gemini API Additional Terms of Service](https://ai.google.dev/gemini-api/terms).
