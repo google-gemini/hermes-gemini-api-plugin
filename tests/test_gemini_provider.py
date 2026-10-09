@@ -253,6 +253,8 @@ class TestGenerate:
         )
         assert "key=" not in called_url
         assert mock_post.call_args.kwargs["headers"]["x-goog-api-key"] == "AQ.test-key"
+        assert mock_post.call_args.kwargs["headers"]["User-Agent"] == gemini_plugin.USER_AGENT
+        assert mock_post.call_args.kwargs["headers"]["User-Agent"].startswith("hermes-agent (gemini-image/")
         assert mock_post.call_args.kwargs["json"]["generationConfig"]["imageConfig"] == {"aspectRatio": "16:9"}
 
     @pytest.mark.parametrize("has_image", [True, False])

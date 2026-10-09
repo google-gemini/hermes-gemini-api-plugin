@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_MODEL = "gemini-nano-banana-2.1"
+PLUGIN_VERSION = "0.1.0"
+USER_AGENT = f"hermes-agent (gemini-image/{PLUGIN_VERSION})"
 
 _ASPECT_RATIOS = {"landscape": "16:9", "square": "1:1", "portrait": "9:16"}
 _GEMINI_RATIOS_10 = (
@@ -507,7 +509,11 @@ class GeminiImageGenProvider(StaticImageGenProvider):
             payload["tools"] = [{"googleSearch": {}}]
 
         url = f"{base_url}/models/{quote(meta['api_model'], safe='')}:generateContent"
-        headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+        headers = {
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        }
         body, failure = post_json(
             url, headers=headers, payload=payload, timeout=_DEFAULT_TIMEOUT,
             label="Google AI Studio", error_message=_extract_error_message,
