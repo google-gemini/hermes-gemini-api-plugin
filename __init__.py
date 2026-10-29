@@ -38,7 +38,10 @@ from urllib.parse import quote
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, success_response)
 from agent.secret_scope import get_secret
-from hermes_cli.version_info import get_version_info
+try:
+    from hermes_cli.version_info import get_version_info
+except ImportError:  # Hermes releases prior to hermes_cli.version_info
+    get_version_info = None  # type: ignore[assignment]
 from plugins.image_gen._common import (
     StaticImageGenProvider, collect_source_images, error_factory, load_image_gen_config,
     post_json, prompt_required_error, record_token_usage, resolve_static_model)
@@ -47,9 +50,17 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_MODEL = "gemini-nano-banana-2.1"
-HERMES_VERSION = f"hermes-agent/{get_version_info().base_version}"
-PLUGIN_VERSION = "0.1.0"
-USER_AGENT = f"{HERMES_VERSION} gemini-image/{PLUGIN_VERSION}"
+def _resolve_hermes_base_version() -> str:
+    if get_version_info is not None:
+        return str(get_version_info().base_version)
+    import hermes_cli as _hermes_cli
+
+    return str(getattr(_hermes_cli, "__version__", "0.0.0"))
+
+
+HERMES_VERSION = f"hermes-agent/{_resolve_hermes_base_version()}"
+PLUGIN_VERSION = "0.2.0"
+USER_AGENT = f"{HERMES_VERSION} gemini-api/{PLUGIN_VERSION}"
 
 _ASPECT_RATIOS = {"landscape": "16:9", "square": "1:1", "portrait": "9:16"}
 _GEMINI_RATIOS_10 = (
@@ -170,7 +181,11 @@ def _named_endpoint(name: str) -> Tuple[str, str]:
     """``(base_url, api_key)`` of the user-declared custom endpoint *name* (``providers:`` /
     ``custom_providers:``), so image generation reuses a chat endpoint's URL and credential without
     duplicating the key into Gemini variables (#83080). Unknown name → ``("", "")`` with a warning."""
-    from hermes_cli.runtime_provider import _get_named_custom_provider
+    try:
+        from hermes_cli.runtime_provider import _get_named_custom_provider
+    except ImportError:
+        logger.warning("hermes_cli.runtime_provider._get_named_custom_provider is unavailable in this Hermes build")
+        return "", ""
 
     entry = _get_named_custom_provider(name)
     if not entry:
@@ -556,6 +571,41 @@ class GeminiImageGenProvider(StaticImageGenProvider):
             provider="gemini", modality="image" if is_edit else "text", extra=extra)
 
 
+def _load_cli_tools_module():
+    """Import sibling ``cli_tools`` across package, loader, and standalone test contexts."""
+    import importlib.util
+    import sys
+
+    pkg = __package__ or __name__
+    parent = pkg.rpartition(".")[0]
+    if pkg in sys.modules and (not parent or parent in sys.modules):
+        from . import cli_tools as _mod
+
+        return _mod
+    mod_name = f"{pkg}.cli_tools"
+    existing = sys.modules.get(mod_name)
+    if existing is not None:
+        return existing
+    tools_path = Path(__file__).resolve().parent / "cli_tools.py"
+    if not tools_path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(mod_name, tools_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def register(ctx) -> None:
-    """Plugin entry point — wire ``GeminiImageGenProvider`` into the registry."""
+    """Plugin entry point — wire Gemini image/video providers, CLI tools, and skill."""
     ctx.register_image_gen_provider(GeminiImageGenProvider())
+    cli_tools = _load_cli_tools_module()
+    if cli_tools is not None:
+        cli_tools.register_cli_integrations(
+            ctx,
+            endpoint_resolver=_resolve_endpoint,
+            image_loader=_load_image_bytes,
+            user_agent=USER_AGENT,
+        )

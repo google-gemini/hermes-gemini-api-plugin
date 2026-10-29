@@ -12,10 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: gemini-image
-version: 0.1.0
-description: "Native Google AI Studio Gemini (Nano Banana) image generation and editing using GEMINI_API_KEY. Saves generated images to $HERMES_HOME/cache/generated/images/."
+name: gemini-api
+version: 0.2.0
+description: "Google AI Studio Gemini plugin for Hermes: native Nano Banana image generation/editing plus gemini-api CLI video generation, Lyria music, 3.8 Flash TTS, multimodal analysis, transcription, Deep Research, and Files API uploads."
 author: Google DeepMind
 kind: backend
 requires_env:
   - GEMINI_API_KEY
+provides_tools:
+  - gemini_music
+  - gemini_tts
+  - gemini_analyze
+  - gemini_transcribe
+  - gemini_deep_research
+  - gemini_files_upload
+external_dependencies:
+  - name: gemini-api
+    install: "go install github.com/google-gemini/gemini-api-cli/cmd/gemini-api@v0.4.4"
+    check: "gemini-api --version"
+config_schema:
+  cli_path:
+    type: str
+    default: ""
+    description: "Optional explicit path to the gemini-api executable."
+  timeout_seconds:
+    type: int
+    default: 180
+    description: "Default timeout in seconds for gemini-api CLI calls."
+  auto_install_cli:
+    type: bool
+    default: false
+    description: "When true, download and SHA-256-verify the pinned gemini-api release into $HERMES_HOME/bin if not found on PATH."

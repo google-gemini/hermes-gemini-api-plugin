@@ -1,10 +1,15 @@
 # hermes-gemini-api-plugin
 
-Native Google AI Studio Gemini (**Nano Banana**) image generation and editing backend plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+Google AI Studio Gemini backend and [gemini-api CLI](https://github.com/google-gemini/gemini-api-cli) integration plugin (`gemini-api`) for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Calls the Gemini REST endpoint (`POST /v1beta/models/{model}:generateContent` with `responseModalities: ["TEXT", "IMAGE"]`), decodes returned `inlineData` images into `$HERMES_HOME/cache/generated/images/`, and records token usage (including Nano Banana 2.1 and Nano Banana Pro thinking tokens) into Hermes session accounting.
+Combines two complementary layers under a single `GEMINI_API_KEY`:
 
-## Supported Models
+1. **Direct REST Image Generation (`GeminiImageGenProvider`)** — Zero-binary **Nano Banana 2.1**, **Nano Banana 2**, **Nano Banana 2 Lite**, and **Nano Banana Pro** generation and multi-reference editing (`POST /v1beta/models/{model}:generateContent`), saving images to `$HERMES_HOME/cache/generated/images/`.
+2. **`gemini-api` CLI Integration (`GeminiVideoGenProvider` + 6 Tools + Skill)** — When the official [`gemini-api`](https://github.com/google-gemini/gemini-api-cli) Go binary is installed, unlocks native `video_generate` (`video_gen.provider: gemini`), Lyria music generation, Gemini 3.8 Flash single/two-speaker TTS, multimodal file & YouTube analysis, speaker-diarized transcription (`.md` / `.srt`), Gemini Deep Research interactions, and resumable Files API uploads (up to 2 GB).
+
+## Capabilities Overview
+
+### 1. Image Generation (`image_gen.provider: gemini`)
 
 | Model ID | Display Name | Speed | Capabilities |
 | :--- | :--- | :--- | :--- |
@@ -13,18 +18,45 @@ Calls the Gemini REST endpoint (`POST /v1beta/models/{model}:generateContent` wi
 | `gemini-3.1-flash-lite-image` | **Nano Banana 2 Lite** (Gemini 3.1 Flash Lite Image) | Fastest | Lowest latency & cost; 10 aspect ratios, `1K` output resolution, up to 14 reference images |
 | `gemini-3-pro-image` | **Nano Banana Pro** (Gemini 3 Pro Image) | Slower | Highest fidelity & reasoning; 10 aspect ratios, `1K` / `2K` / `4K` output resolution, Google Search grounding, up to 14 reference images |
 
+### 2. Video Generation & `gemini-api` CLI Tools
+
+| Surface | CLI Default Model / Agent | Description |
+| :--- | :--- | :--- |
+| `video_generate` (`video_gen.provider: gemini`) | `gemini-omni-1.1-flash` | Text-to-video and image-to-video generation saved to `$HERMES_HOME/cache/videos/` |
+| `gemini_music` | `lyria-3.5` | Instrumental and vocal music generation saved to `$HERMES_HOME/cache/generated/audio/` |
+| `gemini_tts` | `gemini-3.8-flash-tts` | 24 kHz WAV speech synthesis with single-speaker voices (`Kore`, `Puck`, etc.) and 2-speaker scripts |
+| `gemini_analyze` | `gemini-3.8-flash` | Multimodal Q&A over PDFs, videos, audio, images, CSVs, `files/<id>` handles, and YouTube URLs (seamlessly auto-uploads binary media >14 MB via Files API) |
+| `gemini_transcribe` | `gemini-3.8-flash` | Speaker-diarized and timestamped transcripts in `md`, `text`, `json`, or `srt` captions (seamlessly auto-uploads media >14 MB) |
+| `gemini_deep_research` | `deep-research-preview-04-2026` | Start (`run`, async `background: true` by default), poll (`status`), or stop (`cancel`) Gemini Deep Research & Interactions API agent runs |
+| `gemini_files_upload` | Gemini Files API | Resumable upload up to 2 GB (`--wait` until `ACTIVE`), returning a reusable 48-hour `files/<id>` handle |
+| Skill `gemini-api-cli` | `SKILL.md` | Read-only reference (`skill_view`) for ad-hoc `gemini-api` commands (`models`, `--dry-run`, `--usage`, `--schema`) |
+
 ## Installation
+
+### 1. Install the Hermes Plugin
 
 Install from the Hermes Plugin Catalog:
 
 ```bash
-hermes plugins install gemini-image
+hermes plugins install gemini-api
 ```
 
 Or install directly from GitHub:
 
 ```bash
 hermes plugins install https://github.com/google-gemini/hermes-gemini-api-plugin
+```
+
+### 2. Install `gemini-api` CLI *(optional — required for video & CLI tools)*
+
+Image generation works out of the box with zero external binaries. To enable `video_generate` and the six `gemini_*` CLI tools, install [`google-gemini/gemini-api-cli`](https://github.com/google-gemini/gemini-api-cli) (`v0.4.4`+) onto your `PATH` or `~/.hermes/bin/gemini-api`:
+
+```bash
+# Option A: Install with Go 1.22+
+go install github.com/google-gemini/gemini-api-cli/cmd/gemini-api@v0.4.4
+
+# Option B: Download a prebuilt archive from GitHub Releases and verify checksums.txt
+# https://github.com/google-gemini/gemini-api-cli/releases/tag/v0.4.4
 ```
 
 ## Configuration
@@ -37,9 +69,7 @@ Set your Google AI Studio API key ([get one here](https://aistudio.google.com/ap
 GEMINI_API_KEY="your-api-key"
 ```
 
-### 2. Provider & Generation Settings (`~/.hermes/config.yaml`)
-
-Select `gemini` as your image generation provider (or run `hermes tools` → **Image Generation** → **Google AI Studio (direct)**):
+### 2. Provider & Plugin Settings (`~/.hermes/config.yaml`)
 
 ```yaml
 image_gen:
@@ -49,28 +79,32 @@ image_gen:
     image_size: 2K                  # 1K | 2K | 4K (or 512 on gemini-3.1-flash-image)
     aspect_ratio: "16:9"            # exact ratio override (e.g. 1:1, 16:9, 9:16, 21:9, 1:4, 4:1, 1:8, 8:1)
     google_search: false            # enable Google Search grounding on supported models
-    # Optional custom endpoint / credential routing:
-    # base_url: https://generativelanguage.googleapis.com/v1beta
-    # key_env: GEMINI_API_KEY
-    # provider: my-custom-gemini-endpoint
+
+video_gen:
+  provider: gemini
+  gemini:
+    model: ""                       # optional explicit override (empty uses gemini-api CLI's built-in default)
+
+plugins:
+  entries:
+    gemini-api:
+      settings:
+        cli_path: ""                # optional explicit path to gemini-api binary
+        timeout_seconds: 180        # default timeout for gemini-api CLI commands
+        auto_install_cli: false     # opt-in SHA-256-verified release download to $HERMES_HOME/bin/gemini-api
 ```
 
-Optional environment variable overrides for model and endpoint:
+Optional environment variable overrides for image model and endpoint:
 
 - `GEMINI_IMAGE_MODEL` — Override the Gemini image model ID (strips any optional `google/` prefix).
-- `GEMINI_BASE_URL` — Override the Gemini API base URL.
-
-## Features
-
-- **Multi-reference image editing**: Pass `image_url` and/or `reference_image_urls` (up to 14 reference images across HTTP(S) URLs, `data:` URIs, or local file paths) to edit, restyle, or combine images.
-- **Safety & size guards**: Uses Hermes's SSRF-safe HTTP client for remote URLs, blocks local credential store reads via `raise_if_read_blocked`, sniffs magic bytes (`PNG`, `JPEG`, `WebP`, `GIF`) before upload, and enforces a 25 MB per-image cap plus an 80 MB total inline payload ceiling.
-- **Session token accounting**: Reports `promptTokenCount`, `candidatesTokenCount`, `thoughtsTokenCount`, and `cachedContentTokenCount` to Hermes's `record_token_usage`.
+- `GEMINI_BASE_URL` — Override the Gemini API base URL (`https://` required; `http://` allowed for localhost testing only).
 
 ## Security & Privacy Disclosure
 
-- **External network calls**: Sends text prompts and optional inline reference images over HTTPS to `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` (or a custom `image_gen.gemini.base_url`) authenticated via `GEMINI_API_KEY`. Remote `http(s)://` reference image URLs passed to `image_generate` are fetched through Hermes's SSRF-safe HTTP client.
-- **Filesystem access**: Reads local reference image paths explicitly passed by the caller (guarded by `agent.file_safety.raise_if_read_blocked`) and writes generated output images to `$HERMES_HOME/cache/generated/images/`.
-- **No background processes or telemetry**: Spawns no shell commands or background workers and collects no telemetry.
+- **External network calls**: Sends prompts and caller-supplied media over HTTPS to `generativelanguage.googleapis.com` (or a validated `https://` `image_gen.gemini.base_url`) authenticated via `GEMINI_API_KEY`. Remote `http(s)://` reference image URLs are fetched through Hermes's SSRF-safe HTTP client. If `auto_install_cli: true` is explicitly opted into by the user, downloads the pinned `gemini-api` release archive (capped at 64 MiB) and `checksums.txt` from `github.com/google-gemini/gemini-api-cli/releases` and verifies its SHA-256 digest before extraction.
+- **Subprocess execution**: Invokes the local `gemini-api` binary (`--no-interactive -o json`, `stdin=DEVNULL`, `--` end-of-flags guard on positional prompts/paths, profile-scoped `GEMINI_API_KEY`) when `video_generate` (with `video_gen.provider: gemini`) or one of the six `gemini_*` CLI tools is called.
+- **Filesystem access**: Validates all caller-supplied local file paths against `agent.file_safety.raise_if_read_blocked` and regular-file checks before reading or passing them to `gemini-api`, and writes generated outputs only under `$HERMES_HOME/cache/` (`generated/images/`, `generated/audio/`, `videos/`, `transcripts/`).
+- **Session token accounting**: Reports both direct REST `usageMetadata` and CLI `usage` token counts (including thinking tokens) to Hermes's `record_token_usage`.
 
 ## Development & Testing
 

@@ -256,7 +256,7 @@ class TestGenerate:
         ua = mock_post.call_args.kwargs["headers"]["User-Agent"]
         assert ua == gemini_plugin.USER_AGENT
         assert gemini_plugin.HERMES_VERSION in ua
-        assert f"gemini-image/{gemini_plugin.PLUGIN_VERSION}" in ua
+        assert f"gemini-api/{gemini_plugin.PLUGIN_VERSION}" in ua
         assert mock_post.call_args.kwargs["json"]["generationConfig"]["imageConfig"] == {"aspectRatio": "16:9"}
 
     @pytest.mark.parametrize("has_image", [True, False])
@@ -486,18 +486,20 @@ class TestPluginRegistration:
         from agent.image_gen_registry import get_provider
         from hermes_cli.plugins import get_plugin_manager
 
-        user_plugin_dir = tmp_path / "plugins" / "gemini-image"
+        user_plugin_dir = tmp_path / "plugins" / "gemini-api"
         user_plugin_dir.mkdir(parents=True)
-        shutil.copy2(_PLUGIN_ROOT / "plugin.yaml", user_plugin_dir / "plugin.yaml")
-        shutil.copy2(_PLUGIN_ROOT / "__init__.py", user_plugin_dir / "__init__.py")
+        for fname in ("plugin.yaml", "__init__.py", "cli_runner.py", "cli_tools.py", "SKILL.md"):
+            src = _PLUGIN_ROOT / fname
+            if src.is_file():
+                shutil.copy2(src, user_plugin_dir / fname)
         (tmp_path / "config.yaml").write_text(
-            yaml.safe_dump({"plugins": {"enabled": ["gemini-image"]}})
+            yaml.safe_dump({"plugins": {"enabled": ["gemini-api"]}})
         )
 
         mgr = get_plugin_manager()
         mgr.discover_and_load()
-        assert "gemini-image" in mgr._plugins
-        assert mgr._plugins["gemini-image"].enabled is True
+        assert "gemini-api" in mgr._plugins
+        assert mgr._plugins["gemini-api"].enabled is True
         registered = get_provider("gemini")
         assert registered is not None
         assert registered.name == "gemini"
