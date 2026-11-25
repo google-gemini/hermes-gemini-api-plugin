@@ -14,7 +14,8 @@
 
 name: gemini-api
 version: 0.2.0
-description: "Google AI Studio Gemini plugin for Hermes: native Nano Banana image generation/editing plus gemini-api CLI video generation, Lyria music, 3.8 Flash TTS, multimodal analysis, transcription, Deep Research, and Files API uploads."
+requires_hermes: ">=0.22.0"
+description: "Google AI Studio Gemini plugin for Hermes powered by gemini-api CLI (Interactions API): Nano Banana image generation/editing, Gemini Omni video generation, Lyria music, 3.8 Flash TTS, multimodal analysis, transcription, Deep Research, and Files API uploads."
 author: Google DeepMind
 kind: backend
 requires_env:
@@ -28,7 +29,7 @@ provides_tools:
   - gemini_files_upload
 external_dependencies:
   - name: gemini-api
-    install: "go install github.com/google-gemini/gemini-api-cli/cmd/gemini-api@v0.4.4"
+    install: "go install github.com/google-gemini/gemini-api-cli/cmd/gemini-api@v0.5.0"
     check: "gemini-api --version"
 config_schema:
   cli_path:
@@ -38,8 +39,8 @@ config_schema:
   timeout_seconds:
     type: int
     default: 180
-    description: "Default timeout in seconds for gemini-api CLI calls."
+    description: "Optional timeout override in seconds for gemini-api CLI calls (omit to use per-command defaults)."
   auto_install_cli:
     type: bool
     default: false
-    description: "When true, download and SHA-256-verify the pinned gemini-api release into $HERMES_HOME/bin if not found on PATH."
+    description: "When true, download and verify the pinned gemini-api v0.5.0 release (against hardcoded SHA-256 digests) into $HERMES_HOME/bin if not found on PATH."

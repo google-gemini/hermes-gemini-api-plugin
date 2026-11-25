@@ -24,11 +24,12 @@ Registers:
 
 from __future__ import annotations
 
-import base64
 import importlib.util
 import json
 import logging
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -82,19 +83,35 @@ DEFAULT_RESEARCH_TIMEOUT = _cli_runner.DEFAULT_RESEARCH_TIMEOUT
 GeminiCLIRunner = _cli_runner.GeminiCLIRunner
 _read_cached_config = _cli_runner._read_cached_config
 
-# Documented CLI default models (used for Hermes picker metadata and accounting fallback when
-# `-m` is omitted so `gemini-api` owns its built-in default models across CLI upgrades).
-DEFAULT_VIDEO_MODEL = "gemini-omni-1.1-flash"
+# Documented CLI default models for gemini-api v0.5.0 (used for Hermes picker metadata and
+# accounting fallback when `-m` is omitted so `gemini-api` owns its built-in defaults across upgrades).
+DEFAULT_VIDEO_MODEL = "gemini-omni-1.2-flash"
 DEFAULT_MUSIC_MODEL = "lyria-3.5"
 DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts"
-DEFAULT_ANALYZE_MODEL = "gemini-3.8-flash"
+DEFAULT_ANALYZE_MODEL = "gemini-4-hydrogen"
+DEFAULT_TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 DEFAULT_RESEARCH_AGENT = "deep-research-preview-04-2026"
 
+_IMAGE_MIME_TO_SUFFIX = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
 VIDEO_MODELS: Dict[str, Dict[str, Any]] = {
+    "gemini-omni-1.2-flash": {
+        "display": "Gemini Omni 1.2 Flash (Video)",
+        "speed": "~30-120s",
+        "strengths": "Default conversational text-to-video and image-to-video via Gemini Interactions API",
+        "price": "varies",
+        "modalities": ["text", "image"],
+    },
     "gemini-omni-1.1-flash": {
         "display": "Gemini Omni 1.1 Flash (Video)",
         "speed": "~30-120s",
-        "strengths": "Conversational text-to-video and image-to-video via Gemini Interactions API",
+        "strengths": "Previous generation text-to-video and image-to-video via Gemini Interactions API",
         "price": "varies",
         "modalities": ["text", "image"],
     },
@@ -161,7 +178,7 @@ def _cli_failure_to_tool_error(res: CLIResult) -> str:
 
 
 def _extract_interaction_text(payload: Any) -> str:
-    """Pull readable assistant output text from an Interactions API response dict."""
+    """Pull readable model output text from an Interactions API response dict, ignoring user inputs and thoughts."""
     if not isinstance(payload, dict):
         return ""
     direct = payload.get("output_text")
@@ -175,6 +192,10 @@ def _extract_interaction_text(payload: Any) -> str:
         for item in items:
             if not isinstance(item, dict):
                 continue
+            step_type = str(item.get("type") or "").strip().lower()
+            step_role = str(item.get("role") or "").strip().lower()
+            if step_type in ("user_input", "thought") or step_role == "user":
+                continue
             if isinstance(item.get("text"), str) and item["text"].strip():
                 chunks.append(item["text"].strip())
             content = item.get("content")
@@ -185,6 +206,24 @@ def _extract_interaction_text(payload: Any) -> str:
                         if isinstance(txt, str) and txt.strip():
                             chunks.append(txt.strip())
     return "\n\n".join(chunks)
+
+
+def _extract_interaction_errors(payload: Any) -> List[str]:
+    """Extract human-readable error messages from an Interactions API payload's ``errors`` field."""
+    if not isinstance(payload, dict):
+        return []
+    raw_errors = payload.get("errors")
+    if not isinstance(raw_errors, list):
+        return []
+    messages: List[str] = []
+    for entry in raw_errors:
+        if isinstance(entry, dict):
+            msg = str(entry.get("message") or entry.get("code") or "").strip()
+            if msg:
+                messages.append(msg)
+        elif isinstance(entry, str) and entry.strip():
+            messages.append(entry.strip())
+    return messages
 
 
 class GeminiVideoGenProvider(VideoGenProvider):
@@ -256,7 +295,7 @@ class GeminiVideoGenProvider(VideoGenProvider):
         seed: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        del reference_image_urls, resolution, negative_prompt, audio, seed, kwargs
+        del reference_image_urls, negative_prompt, audio, seed, kwargs
         cleaned_prompt = (prompt or "").strip()
         explicit_model = _resolve_explicit_video_model(model)
         accounting_model = explicit_model or DEFAULT_VIDEO_MODEL
@@ -286,50 +325,81 @@ class GeminiVideoGenProvider(VideoGenProvider):
         cli_args: List[str] = ["video", "--out", str(out_dir)]
         if explicit_model:
             cli_args.extend(["-m", explicit_model])
+        cleaned_aspect = str(aspect_ratio or "").strip()
+        if cleaned_aspect and not cleaned_aspect.startswith("-"):
+            cli_args.extend(["--aspect-ratio", cleaned_aspect])
+        cleaned_resolution = str(resolution or "").strip()
+        if cleaned_resolution and not cleaned_resolution.startswith("-"):
+            cli_args.extend(["--resolution", cleaned_resolution])
 
-        positional_args: List[str] = []
-        if modality == "image" and image_url:
-            ref = image_url.strip()
-            if ref.startswith("files/"):
-                valid_ref, ref_err, _ = self._runner.prepare_media_input(ref, allow_youtube=False)
+        tmp_image_path: Optional[Path] = None
+        try:
+            if modality == "image" and image_url:
+                ref = image_url.strip()
+                if ref.startswith("files/"):
+                    valid_ref, ref_err, _ = self._runner.prepare_media_input(ref, allow_youtube=False)
+                elif ref.lower().startswith(("http://", "https://", "data:")):
+                    try:
+                        raw_bytes, mime = self._load_image_bytes(ref)
+                    except Exception as exc:  # noqa: BLE001
+                        return video_error_response(
+                            error=f"Could not load image_url for video generation: {exc}",
+                            error_type="invalid_argument",
+                            provider="gemini",
+                            model=accounting_model,
+                            prompt=cleaned_prompt,
+                            aspect_ratio=aspect_ratio,
+                        )
+                    suffix = _IMAGE_MIME_TO_SUFFIX.get(mime, ".png")
+                    with tempfile.NamedTemporaryFile(
+                        prefix="hermes-video-ref-", suffix=suffix, delete=False
+                    ) as tmp_file:
+                        tmp_image_path = Path(tmp_file.name)
+                        tmp_file.write(raw_bytes)
+                    if os.name != "nt":
+                        tmp_image_path.chmod(0o600)
+                    valid_ref, ref_err, _ = self._runner.prepare_media_input(
+                        str(tmp_image_path), allow_youtube=False, mime_type=mime
+                    )
+                else:
+                    try:
+                        _, mime = self._load_image_bytes(ref)
+                    except Exception as exc:  # noqa: BLE001
+                        return video_error_response(
+                            error=f"Could not load image_url for video generation: {exc}",
+                            error_type="invalid_argument",
+                            provider="gemini",
+                            model=accounting_model,
+                            prompt=cleaned_prompt,
+                            aspect_ratio=aspect_ratio,
+                        )
+                    valid_ref, ref_err, _ = self._runner.prepare_media_input(
+                        ref, allow_youtube=False, mime_type=mime
+                    )
+
                 if ref_err is not None or not valid_ref:
                     return video_error_response(
-                        error=ref_err.error if ref_err is not None else "Invalid files/<id> handle.",
-                        error_type="invalid_argument",
+                        error=ref_err.error if ref_err is not None else "Invalid image_url for video generation.",
+                        error_type=(ref_err.error_type if ref_err is not None else "") or "invalid_argument",
                         provider="gemini",
                         model=accounting_model,
                         prompt=cleaned_prompt,
                         aspect_ratio=aspect_ratio,
                     )
-                image_part: Dict[str, Any] = {"type": "image", "uri": valid_ref}
-            else:
-                try:
-                    raw_bytes, mime = self._load_image_bytes(ref)
-                except Exception as exc:  # noqa: BLE001
-                    return video_error_response(
-                        error=f"Could not load image_url for video generation: {exc}",
-                        error_type="invalid_argument",
-                        provider="gemini",
-                        model=accounting_model,
-                        prompt=cleaned_prompt,
-                        aspect_ratio=aspect_ratio,
-                    )
-                image_part = {
-                    "type": "image",
-                    "mime_type": mime,
-                    "data": base64.b64encode(raw_bytes).decode("ascii"),
-                }
-            body = json.dumps({"input": [image_part, {"type": "text", "text": cleaned_prompt}]})
-            cli_args.extend(["--body", body])
-        else:
-            positional_args.append(cleaned_prompt)
+                cli_args.extend(["-i", valid_ref])
 
-        res = self._runner.run(
-            cli_args,
-            positional_args=positional_args,
-            timeout=DEFAULT_RESEARCH_TIMEOUT,
-            default_model=accounting_model,
-        )
+            res = self._runner.run(
+                cli_args,
+                positional_args=[cleaned_prompt],
+                default_timeout=DEFAULT_RESEARCH_TIMEOUT,
+                default_model=accounting_model,
+            )
+        finally:
+            if tmp_image_path is not None:
+                try:
+                    tmp_image_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
         if not res.ok:
             return video_error_response(
                 error=res.error,
@@ -590,15 +660,21 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
         res = runner.run(
             cmd_args,
             positional_args=[prompt],
-            timeout=300,
+            default_timeout=300,
             default_model=explicit_model or DEFAULT_MUSIC_MODEL,
         )
         if not res.ok:
             return _cli_failure_to_tool_error(res)
         payload = res.data if isinstance(res.data, dict) else {}
+        audio_path = str(payload.get("path") or "").strip()
+        if not audio_path or not Path(audio_path).is_file():
+            return tool_error(
+                "gemini-api music completed without returning a valid output audio file path.",
+                error_type="invalid_response",
+            )
         return tool_result({
             "success": True,
-            "audio": payload.get("path"),
+            "audio": audio_path,
             "mime_type": payload.get("mime_type"),
             "size_bytes": payload.get("size_bytes"),
             "response_id": payload.get("response_id"),
@@ -632,15 +708,21 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
         res = runner.run(
             cmd_args,
             positional_args=[text],
-            timeout=DEFAULT_CLI_TIMEOUT,
+            default_timeout=DEFAULT_CLI_TIMEOUT,
             default_model=explicit_model or DEFAULT_TTS_MODEL,
         )
         if not res.ok:
             return _cli_failure_to_tool_error(res)
         payload = res.data if isinstance(res.data, dict) else {}
+        audio_path = str(payload.get("path") or "").strip()
+        if not audio_path or not Path(audio_path).is_file():
+            return tool_error(
+                "gemini-api tts completed without returning a valid output audio file path.",
+                error_type="invalid_response",
+            )
         return tool_result({
             "success": True,
-            "audio": payload.get("path"),
+            "audio": audio_path,
             "mime_type": payload.get("mime_type", "audio/wav"),
             "size_bytes": payload.get("size_bytes"),
             "sample_rate": payload.get("sample_rate"),
@@ -689,7 +771,7 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
         res = runner.run(
             cmd_args,
             positional_args=positional,
-            timeout=300,
+            default_timeout=300,
             default_model=explicit_model or DEFAULT_ANALYZE_MODEL,
         )
         if not res.ok:
@@ -736,8 +818,8 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
 
         res = runner.run(
             cmd_args,
-            timeout=300,
-            default_model=explicit_model or DEFAULT_ANALYZE_MODEL,
+            default_timeout=300,
+            default_model=explicit_model or DEFAULT_TRANSCRIBE_MODEL,
         )
         if not res.ok:
             return _cli_failure_to_tool_error(res)
@@ -754,13 +836,15 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
                     text_body = Path(out_path).read_text(encoding="utf-8", errors="replace")
                     if len(text_body) <= 32768:
                         item_out["content"] = text_body
+                    else:
+                        item_out["content_omitted"] = True
                 except OSError:
                     pass
             transcripts.append(item_out)
         return tool_result({
             "success": True,
             "format": payload.get("format") or fmt,
-            "model": payload.get("model") or explicit_model or DEFAULT_ANALYZE_MODEL,
+            "model": payload.get("model") or explicit_model or DEFAULT_TRANSCRIBE_MODEL,
             "results": transcripts,
             "provider": "gemini",
         })
@@ -777,26 +861,40 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
             if not prompt:
                 return tool_error("A non-empty 'prompt' is required when action='run'.", error_type="invalid_argument")
             agent_id = str(args.get("agent") or "").strip() or DEFAULT_RESEARCH_AGENT
+            if agent_id.startswith("-"):
+                return tool_error(f"Invalid 'agent' {agent_id!r}.", error_type="invalid_argument")
             raw_bg = args.get("background")
             background = True if raw_bg is None else bool(raw_bg)
             cmd_args = ["agent", "run", "--agent", agent_id, "--stream=false"]
             if background:
                 cmd_args.append("--background")
-            timeout = 60 if background else DEFAULT_RESEARCH_TIMEOUT
             res = runner.run(
                 cmd_args,
                 positional_args=[prompt],
-                timeout=timeout,
+                default_timeout=60 if background else DEFAULT_RESEARCH_TIMEOUT,
                 default_model=agent_id,
             )
             if not res.ok:
                 return _cli_failure_to_tool_error(res)
             payload = res.data if isinstance(res.data, dict) else {}
+            status = str(payload.get("status") or "").strip() or None
+            errors = _extract_interaction_errors(payload)
+            if status == "failed" or (errors and status != "completed"):
+                err_msg = "; ".join(errors) if errors else f"Deep Research interaction ended with status={status!r}"
+                return tool_error(
+                    err_msg,
+                    error_type="api_error",
+                    action="run",
+                    interaction_id=payload.get("id"),
+                    status=status,
+                    errors=errors or None,
+                    provider="gemini",
+                )
             return tool_result({
                 "success": True,
                 "action": "run",
                 "interaction_id": payload.get("id"),
-                "status": payload.get("status"),
+                "status": status,
                 "agent": agent_id,
                 "background": background,
                 "output_text": _extract_interaction_text(payload),
@@ -815,20 +913,36 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
                 error_type="invalid_argument",
             )
         if action == "status":
-            res = runner.run(["agent", "status", "--id", interaction_id, "--stream=false"], timeout=60)
+            res = runner.run(
+                ["agent", "status", "--id", interaction_id, "--stream=false"],
+                default_timeout=60,
+            )
             if not res.ok:
                 return _cli_failure_to_tool_error(res)
             payload = res.data if isinstance(res.data, dict) else {}
+            status = str(payload.get("status") or "").strip() or None
+            errors = _extract_interaction_errors(payload)
+            if status == "failed" or (errors and status != "completed"):
+                err_msg = "; ".join(errors) if errors else f"Deep Research interaction ended with status={status!r}"
+                return tool_error(
+                    err_msg,
+                    error_type="api_error",
+                    action="status",
+                    interaction_id=payload.get("id") or interaction_id,
+                    status=status,
+                    errors=errors or None,
+                    provider="gemini",
+                )
             return tool_result({
                 "success": True,
                 "action": "status",
                 "interaction_id": payload.get("id") or interaction_id,
-                "status": payload.get("status"),
+                "status": status,
                 "output_text": _extract_interaction_text(payload),
                 "provider": "gemini",
             })
 
-        res = runner.run(["agent", "cancel", "--id", interaction_id], timeout=60)
+        res = runner.run(["agent", "cancel", "--id", interaction_id], default_timeout=60)
         if not res.ok:
             return _cli_failure_to_tool_error(res)
         payload = res.data if isinstance(res.data, dict) else {}
@@ -880,20 +994,25 @@ def register_cli_integrations(
     endpoint_resolver: Callable[[], Tuple[str, str]],
     image_loader: Callable[[str], Tuple[bytes, str]],
     user_agent: str,
+    runner: Optional[GeminiCLIRunner] = None,
 ) -> GeminiCLIRunner:
     """Register ``GeminiVideoGenProvider``, structured CLI tools, and ``SKILL.md`` on *ctx*."""
-    runner = GeminiCLIRunner(endpoint_resolver=endpoint_resolver, user_agent=user_agent)
+    active_runner = (
+        runner
+        if runner is not None
+        else GeminiCLIRunner(endpoint_resolver=endpoint_resolver, user_agent=user_agent)
+    )
 
     if hasattr(ctx, "register_video_gen_provider"):
         ctx.register_video_gen_provider(
             GeminiVideoGenProvider(
-                runner=runner,
+                runner=active_runner,
                 endpoint_resolver=endpoint_resolver,
                 image_loader=image_loader,
             )
         )
 
-    handlers = build_tool_handlers(runner)
+    handlers = build_tool_handlers(active_runner)
     tool_specs = (
         ("gemini_music", GEMINI_MUSIC_SCHEMA, "🎵"),
         ("gemini_tts", GEMINI_TTS_SCHEMA, "🗣️"),
@@ -908,7 +1027,7 @@ def register_cli_integrations(
             toolset="gemini_api",
             schema=schema,
             handler=handlers[tool_name],
-            check_fn=runner.is_available,
+            check_fn=active_runner.is_available,
             requires_env=["GEMINI_API_KEY"],
             description=schema["description"],
             emoji=emoji,
@@ -921,4 +1040,4 @@ def register_cli_integrations(
             skill_path,
             description="Non-interactive command reference for google-gemini/gemini-api-cli",
         )
-    return runner
+    return active_runner
