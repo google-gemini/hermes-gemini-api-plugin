@@ -179,6 +179,10 @@ class TestModelResolution:
         assert model_id == "gemini-3-pro-image"
         assert meta["api_model"] == "gemini-3-pro-image"
 
+        assert gemini_plugin._strip_google_prefix("--evil-flag") is None
+        assert gemini_plugin._strip_google_prefix("google/--evil-flag") is None
+        assert gemini_plugin._strip_google_prefix("google/") is None
+
     def test_config_gemini_model_and_foreign_top_level_ignored(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
             yaml.safe_dump({"image_gen": {"model": "gpt-image-2-medium", "gemini": {"model": "gemini-3.1-flash-lite-image"}}})
@@ -207,7 +211,7 @@ class TestEndpointConfig:
 
 
 class TestSourceImageLoading:
-    def test_load_image_bytes_blocks_credential_store(self, tmp_path, monkeypatch):
+    def test_load_image_bytes_blocks_credential_store_and_symlinks(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         auth_json = hermes_home / "auth.json"
@@ -216,6 +220,14 @@ class TestSourceImageLoading:
 
         with pytest.raises(ValueError, match="credential store"):
             gemini_plugin._load_image_bytes(str(auth_json))
+
+        # A symlink pointing to a blocked credential file must also be rejected after resolution.
+        symlink_path = tmp_path / "innocent.png"
+        symlink_path.symlink_to(auth_json)
+        with pytest.raises(ValueError, match="credential store"):
+            gemini_plugin._load_image_bytes(str(symlink_path))
+        with pytest.raises(ValueError, match="credential store"):
+            gemini_plugin._sniff_local_image_mime(str(symlink_path))
 
     def test_load_image_bytes_allows_legit_local_image(self, tmp_path):
         img = tmp_path / "pic.png"

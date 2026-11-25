@@ -642,10 +642,12 @@ class TestVideoGenProviderAndTools:
         assert "files/part2id" in ana_cmd
         assert ana_cmd[ana_cmd.index("--") + 1:] == ["Compare the reports and video"]
 
-        # Transcribe reads back generated SRT file content when <=32KB.
+        # Transcribe reads back generated SRT file content when <=32KB and inside cache/transcripts.
         audio = tmp_path / "clip.mp3"
         audio.write_bytes(b"audio-bytes")
-        srt_out = tmp_path / "clip.srt"
+        transcript_dir = tmp_path / "cache" / "transcripts"
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        srt_out = transcript_dir / "clip.srt"
         srt_out.write_text("1\n00:00:00,000 --> 00:00:02,000\nHello world\n", encoding="utf-8")
         with patch(
             "subprocess.run",
@@ -717,7 +719,7 @@ class TestVideoGenProviderAndTools:
         assert bad_agent["error_type"] == "invalid_argument"
 
         # Oversized transcript omits inline content and signals content_omitted=True.
-        big_srt = tmp_path / "big.srt"
+        big_srt = transcript_dir / "big.srt"
         big_srt.write_text("x" * 40000, encoding="utf-8")
         with patch(
             "subprocess.run",
@@ -729,6 +731,31 @@ class TestVideoGenProviderAndTools:
         assert tr_big["success"] is True
         assert "content" not in tr_big["results"][0]
         assert tr_big["results"][0]["content_omitted"] is True
+
+        # Transcribe refuses to read back paths outside cache/transcripts or symlinks to blocked files.
+        outside_file = tmp_path / "outside.txt"
+        outside_file.write_text("should not be read back", encoding="utf-8")
+        auth_json = tmp_path / "auth.json"
+        auth_json.write_text('{"secret":"blocked"}', encoding="utf-8")
+        symlink_in_cache = transcript_dir / "escape.txt"
+        symlink_in_cache.symlink_to(auth_json)
+        with patch(
+            "subprocess.run",
+            return_value=_completed_proc(
+                {
+                    "format": "text",
+                    "model": cli_tools.DEFAULT_TRANSCRIBE_MODEL,
+                    "results": [
+                        {"input": str(audio), "path": str(outside_file)},
+                        {"input": str(audio), "path": str(symlink_in_cache)},
+                    ],
+                }
+            ),
+        ):
+            tr_escape = json.loads(handlers["gemini_transcribe"]({"inputs": [str(audio)], "format": "text"}))
+        assert tr_escape["success"] is True
+        assert "content" not in tr_escape["results"][0]
+        assert "content" not in tr_escape["results"][1]
 
         # Missing audio output file from music/tts returns invalid_response instead of success.
         with patch("subprocess.run", return_value=_completed_proc({"path": str(tmp_path / "missing.mp3")})):
@@ -759,6 +786,48 @@ class TestVideoGenProviderAndTools:
             up = json.loads(handlers["gemini_files_upload"]({"path": str(sample), "display_name": "Q4 Deck"}))
         assert up["success"] is True
         assert up["name"] == "files/deck77"
+
+    def test_security_hardening_symlinks_and_flag_injection_guards(self, runner, tmp_path):
+        handlers = cli_tools.build_tool_handlers(runner)
+
+        # Symlink pointing to blocked credential file must be rejected by _validate_local_file / prepare_media_input.
+        auth_json = tmp_path / "auth.json"
+        auth_json.write_text('{"api_key":"blocked"}', encoding="utf-8")
+        link = tmp_path / "harmless.pdf"
+        link.symlink_to(auth_json)
+        ref, err, _ = runner.prepare_media_input(str(link))
+        assert ref is None
+        assert err is not None and err.error_type == "invalid_argument"
+        assert "credential store" in err.error.lower()
+
+        # Leading-dash display_name / mime_type / voice / multi_speaker / language rejected locally.
+        sample = tmp_path / "doc.pdf"
+        sample.write_bytes(b"%PDF-1.4")
+        with patch("subprocess.run") as mock_run:
+            bad_dn = json.loads(handlers["gemini_files_upload"]({"path": str(sample), "display_name": "--evil"}))
+            bad_mt = json.loads(handlers["gemini_files_upload"]({"path": str(sample), "mime_type": "--evil"}))
+            bad_voice = json.loads(handlers["gemini_tts"]({"text": "hi", "voice": "--evil"}))
+            bad_ms = json.loads(handlers["gemini_tts"]({"text": "hi", "multi_speaker": "--evil"}))
+            bad_lang = json.loads(handlers["gemini_tts"]({"text": "hi", "language": "--evil"}))
+            bad_ana_mt = json.loads(handlers["gemini_analyze"]({"inputs": [str(sample)], "mime_type": "--evil"}))
+        for res in (bad_dn, bad_mt, bad_voice, bad_ms, bad_lang, bad_ana_mt):
+            assert res["error_type"] == "invalid_argument"
+        mock_run.assert_not_called()
+
+        # _strip_google_prefix drops leading-dash model IDs so they cannot inject CLI flags.
+        assert cli_tools._strip_google_prefix("--evil") is None
+        assert cli_tools._strip_google_prefix("google/--evil") is None
+        assert cli_tools._strip_google_prefix("google/") is None
+
+        # Leading-dash system instructions use --system=<val> so markdown bullets work safely.
+        with patch("subprocess.run", return_value=_completed_proc({"text": "ok"})) as mock_run:
+            ana = json.loads(
+                handlers["gemini_analyze"]({"inputs": [str(sample)], "system": "- Be concise", "model": "--ignored"})
+            )
+        assert ana["success"] is True
+        cmd = mock_run.call_args.args[0]
+        assert "-m" not in cmd
+        assert "--system=- Be concise" in cmd
 
 
 class TestPluginManifestAndValidatorParity:

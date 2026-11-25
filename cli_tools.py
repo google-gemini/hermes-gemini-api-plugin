@@ -29,7 +29,6 @@ import json
 import logging
 import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -141,7 +140,8 @@ def _strip_google_prefix(value: Optional[str]) -> Optional[str]:
     if not isinstance(value, str) or not value.strip():
         return None
     raw = value.strip()
-    return raw.split("/", 1)[1].strip() if raw.lower().startswith("google/") else raw
+    cleaned = raw.split("/", 1)[1].strip() if raw.lower().startswith("google/") else raw
+    return None if (not cleaned or cleaned.startswith("-")) else cleaned
 
 
 def _load_video_gen_gemini_config() -> Dict[str, Any]:
@@ -238,10 +238,12 @@ class GeminiVideoGenProvider(VideoGenProvider):
         runner: GeminiCLIRunner,
         endpoint_resolver: Callable[[], Tuple[str, str]],
         image_loader: Callable[[str], Tuple[bytes, str]],
+        local_mime_sniffer: Optional[Callable[[str], str]] = None,
     ) -> None:
         self._runner = runner
         self._resolve_endpoint = endpoint_resolver
         self._load_image_bytes = image_loader
+        self._local_mime_sniffer = local_mime_sniffer
 
     def is_available(self) -> bool:
         return self._runner.is_available()
@@ -332,54 +334,24 @@ class GeminiVideoGenProvider(VideoGenProvider):
         if cleaned_resolution and not cleaned_resolution.startswith("-"):
             cli_args.extend(["--resolution", cleaned_resolution])
 
-        tmp_image_path: Optional[Path] = None
+        tmp_files: List[Path] = []
         try:
             if modality == "image" and image_url:
-                ref = image_url.strip()
-                if ref.startswith("files/"):
-                    valid_ref, ref_err, _ = self._runner.prepare_media_input(ref, allow_youtube=False)
-                elif ref.lower().startswith(("http://", "https://", "data:")):
-                    try:
-                        raw_bytes, mime = self._load_image_bytes(ref)
-                    except Exception as exc:  # noqa: BLE001
-                        return video_error_response(
-                            error=f"Could not load image_url for video generation: {exc}",
-                            error_type="invalid_argument",
-                            provider="gemini",
-                            model=accounting_model,
-                            prompt=cleaned_prompt,
-                            aspect_ratio=aspect_ratio,
-                        )
-                    suffix = _IMAGE_MIME_TO_SUFFIX.get(mime, ".png")
-                    with tempfile.NamedTemporaryFile(
-                        prefix="hermes-video-ref-", suffix=suffix, delete=False
-                    ) as tmp_file:
-                        tmp_image_path = Path(tmp_file.name)
-                        tmp_file.write(raw_bytes)
-                    if os.name != "nt":
-                        tmp_image_path.chmod(0o600)
-                    valid_ref, ref_err, _ = self._runner.prepare_media_input(
-                        str(tmp_image_path), allow_youtube=False, mime_type=mime
-                    )
-                else:
-                    try:
-                        _, mime = self._load_image_bytes(ref)
-                    except Exception as exc:  # noqa: BLE001
-                        return video_error_response(
-                            error=f"Could not load image_url for video generation: {exc}",
-                            error_type="invalid_argument",
-                            provider="gemini",
-                            model=accounting_model,
-                            prompt=cleaned_prompt,
-                            aspect_ratio=aspect_ratio,
-                        )
-                    valid_ref, ref_err, _ = self._runner.prepare_media_input(
-                        ref, allow_youtube=False, mime_type=mime
-                    )
-
+                valid_ref, ref_err, _ = self._runner.prepare_image_input(
+                    image_url,
+                    image_loader=self._load_image_bytes,
+                    local_mime_sniffer=self._local_mime_sniffer,
+                    mime_to_suffix=_IMAGE_MIME_TO_SUFFIX,
+                    tmp_files=tmp_files,
+                    tmp_prefix="hermes-video-ref-",
+                )
                 if ref_err is not None or not valid_ref:
                     return video_error_response(
-                        error=ref_err.error if ref_err is not None else "Invalid image_url for video generation.",
+                        error=(
+                            f"Could not load image_url for video generation: {ref_err.error}"
+                            if ref_err is not None
+                            else "Invalid image_url for video generation."
+                        ),
                         error_type=(ref_err.error_type if ref_err is not None else "") or "invalid_argument",
                         provider="gemini",
                         model=accounting_model,
@@ -395,7 +367,7 @@ class GeminiVideoGenProvider(VideoGenProvider):
                 default_model=accounting_model,
             )
         finally:
-            if tmp_image_path is not None:
+            for tmp_image_path in tmp_files:
                 try:
                     tmp_image_path.unlink(missing_ok=True)
                 except OSError:
@@ -688,6 +660,8 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
             return tool_error("A non-empty 'text' is required for gemini_tts.", error_type="invalid_argument")
         multi_speaker = str(args.get("multi_speaker") or "").strip()
         voice = str(args.get("voice") or "").strip()
+        if multi_speaker.startswith("-") or voice.startswith("-"):
+            return tool_error("Voice or multi_speaker cannot start with a dash.", error_type="invalid_argument")
         if multi_speaker and voice:
             return tool_error(
                 "Pass either 'voice' (single-speaker) or 'multi_speaker' (two-speaker), not both.",
@@ -704,6 +678,8 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
             cmd_args.extend(["--voice", voice])
         language = str(args.get("language") or "").strip()
         if language:
+            if language.startswith("-"):
+                return tool_error("Language cannot start with a dash.", error_type="invalid_argument")
             cmd_args.extend(["--language", language])
         res = runner.run(
             cmd_args,
@@ -736,6 +712,8 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
         if not raw_inputs:
             return tool_error("At least one entry in 'inputs' is required for gemini_analyze.", error_type="invalid_argument")
         mime_type = str(args.get("mime_type") or "").strip()
+        if mime_type.startswith("-"):
+            return tool_error("MIME type cannot start with a dash.", error_type="invalid_argument")
         if mime_type and len(raw_inputs) > 1:
             return tool_error("'mime_type' can only be specified when a single input is provided.", error_type="invalid_argument")
 
@@ -764,7 +742,7 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
             cmd_args.extend(["--mime-type", mime_type])
         system = str(args.get("system") or "").strip()
         if system:
-            cmd_args.extend(["--system", system])
+            cmd_args.append(f"--system={system}")
         question = str(args.get("question") or "").strip()
         positional = [question] if question else []
 
@@ -825,20 +803,27 @@ def build_tool_handlers(runner: GeminiCLIRunner) -> Dict[str, Callable[..., str]
             return _cli_failure_to_tool_error(res)
         payload = res.data if isinstance(res.data, dict) else {}
         results = payload.get("results") if isinstance(payload.get("results"), list) else []
+        out_dir_resolved = out_dir.resolve()
         transcripts: List[Dict[str, Any]] = []
         for entry in results:
             if not isinstance(entry, dict):
                 continue
             item_out = dict(entry)
             out_path = entry.get("path")
-            if isinstance(out_path, str) and Path(out_path).is_file():
+            if isinstance(out_path, str) and out_path.strip():
                 try:
-                    text_body = Path(out_path).read_text(encoding="utf-8", errors="replace")
-                    if len(text_body) <= 32768:
-                        item_out["content"] = text_body
-                    else:
-                        item_out["content_omitted"] = True
-                except OSError:
+                    from agent.file_safety import raise_if_read_blocked
+
+                    raise_if_read_blocked(out_path)
+                    resolved_out = Path(os.path.expanduser(out_path)).resolve()
+                    raise_if_read_blocked(str(resolved_out))
+                    if resolved_out.is_relative_to(out_dir_resolved) and resolved_out.is_file():
+                        text_body = resolved_out.read_text(encoding="utf-8", errors="replace")
+                        if len(text_body) <= 32768:
+                            item_out["content"] = text_body
+                        else:
+                            item_out["content_omitted"] = True
+                except Exception:  # noqa: BLE001
                     pass
             transcripts.append(item_out)
         return tool_result({
@@ -995,6 +980,7 @@ def register_cli_integrations(
     image_loader: Callable[[str], Tuple[bytes, str]],
     user_agent: str,
     runner: Optional[GeminiCLIRunner] = None,
+    local_mime_sniffer: Optional[Callable[[str], str]] = None,
 ) -> GeminiCLIRunner:
     """Register ``GeminiVideoGenProvider``, structured CLI tools, and ``SKILL.md`` on *ctx*."""
     active_runner = (
@@ -1009,6 +995,7 @@ def register_cli_integrations(
                 runner=active_runner,
                 endpoint_resolver=endpoint_resolver,
                 image_loader=image_loader,
+                local_mime_sniffer=local_mime_sniffer,
             )
         )
 

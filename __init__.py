@@ -37,7 +37,6 @@ import json
 import logging
 import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -51,7 +50,7 @@ from agent.image_gen_provider import (
     success_response,
 )
 from agent.secret_scope import get_secret
-from hermes_cli.config import get_compatible_custom_providers, load_config, load_config_readonly
+from hermes_cli.config import get_compatible_custom_providers, load_config_readonly
 from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
@@ -180,11 +179,21 @@ MODELS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _read_config_cached() -> Dict[str, Any]:
+    """Read ``config.yaml`` using ``cli_runner``'s ``(mtime_ns, size)`` cache to avoid per-turn YAML reparsing."""
+    runner_mod = _load_sibling_module("cli_runner")
+    if runner_mod is not None and hasattr(runner_mod, "_read_cached_config"):
+        cfg = runner_mod._read_cached_config()
+        return cfg if isinstance(cfg, dict) else {}
+    cfg = load_config_readonly() or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def _load_image_gen_config(sub: Optional[str] = None) -> Dict[str, Any]:
-    """Read ``image_gen`` (or ``image_gen.<sub>``) via public ``hermes_cli.config.load_config``."""
+    """Read ``image_gen`` (or ``image_gen.<sub>``) via cached public ``hermes_cli.config``."""
     label = "image_gen" if sub is None else f"image_gen.{sub}"
     try:
-        cfg = load_config()
+        cfg = _read_config_cached()
         section = cfg.get("image_gen") if isinstance(cfg, dict) else None
         if sub is not None:
             section = section.get(sub) if isinstance(section, dict) else None
@@ -225,7 +234,8 @@ def _strip_google_prefix(value: Optional[str]) -> Optional[str]:
     if not isinstance(value, str) or not value.strip():
         return None
     raw = value.strip()
-    return raw.split("/", 1)[1].strip() if raw.lower().startswith("google/") else raw
+    cleaned = raw.split("/", 1)[1].strip() if raw.lower().startswith("google/") else raw
+    return None if (not cleaned or cleaned.startswith("-")) else cleaned
 
 
 def _custom_model_meta(model_id: str) -> Dict[str, Any]:
@@ -282,7 +292,7 @@ def _named_endpoint(name: str) -> Tuple[str, str]:
     if not target:
         return "", ""
     try:
-        cfg = load_config_readonly() or {}
+        cfg = _read_config_cached()
         providers = get_compatible_custom_providers(cfg) or []
     except Exception:  # noqa: BLE001
         providers = []
@@ -389,6 +399,28 @@ def _cap_message(ref: str) -> str:
     return f"exceeds the {_MAX_INPUT_IMAGE_BYTES // (1024 * 1024)}MB per-image cap: {ref}"
 
 
+def _resolve_safe_local_image(ref: str) -> Path:
+    """Resolve symlinks and enforce ``raise_if_read_blocked`` plus size cap on a local image path."""
+    from agent.file_safety import raise_if_read_blocked
+
+    raise_if_read_blocked(ref)
+    path = Path(os.path.expanduser(ref)).resolve()
+    raise_if_read_blocked(str(path))
+    if not path.is_file():
+        raise ValueError(f"Image input path is not a regular file or does not exist: {ref}")
+    if path.stat().st_size > _MAX_INPUT_IMAGE_BYTES:
+        raise ValueError(f"Image input path {_cap_message(ref)}")
+    return path
+
+
+def _sniff_local_image_mime(ref: str) -> str:
+    """Validate a local image path and sniff its MIME type from only the first 16 header bytes."""
+    path = _resolve_safe_local_image(ref)
+    with path.open("rb") as fh:
+        header = fh.read(16)
+    return _sniff_mime(header)
+
+
 def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
     """Load ``(data, mime_type)`` from a URL, data URI, or local path with SSRF and file-safety guards."""
     ref = ref.strip()
@@ -398,9 +430,12 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
 
         chunks: List[bytes] = []
         total = 0
-        with create_ssrf_safe_client(timeout=30.0) as client:
+        with create_ssrf_safe_client(timeout=30.0, follow_redirects=True) as client:
             with client.stream("GET", ref) as resp:
                 resp.raise_for_status()
+                declared = (resp.headers.get("Content-Length") or "").strip()
+                if declared.isdigit() and int(declared) > _MAX_INPUT_IMAGE_BYTES:
+                    raise ValueError(f"Image URL {_cap_message(ref)}")
                 for chunk in resp.iter_bytes():
                     total += len(chunk)
                     if total > _MAX_INPUT_IMAGE_BYTES:
@@ -419,14 +454,7 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
         if len(raw) > _MAX_INPUT_IMAGE_BYTES:
             raise ValueError(f"Image data URI {_cap_message('data:')}")
         return raw, _sniff_mime(raw)
-    from agent.file_safety import raise_if_read_blocked
-
-    raise_if_read_blocked(ref)
-    path = Path(os.path.expanduser(ref))
-    if not path.is_file():
-        raise ValueError(f"Image input path is not a regular file or does not exist: {ref}")
-    if path.stat().st_size > _MAX_INPUT_IMAGE_BYTES:
-        raise ValueError(f"Image input path {_cap_message(ref)}")
+    path = _resolve_safe_local_image(ref)
     raw = path.read_bytes()
     if len(raw) > _MAX_INPUT_IMAGE_BYTES:
         raise ValueError(f"Image input path {_cap_message(ref)}")
@@ -555,50 +583,21 @@ class GeminiImageGenProvider(ImageGenProvider):
         default_timeout = int(getattr(runner_mod, "DEFAULT_CLI_TIMEOUT", 180)) if runner_mod else 180
         try:
             for ref in sources:
-                if ref.startswith("files/"):
-                    valid_ref, ref_err, added_cost = self._runner.prepare_media_input(
-                        ref,
-                        allow_youtube=False,
-                        inline_budget_used=inline_used,
-                        enforce_cumulative=True,
-                    )
-                elif ref.lower().startswith(("http://", "https://", "data:")):
-                    try:
-                        raw_bytes, mime = _load_image_bytes(ref)
-                    except Exception as exc:  # noqa: BLE001
-                        return fail(f"Could not load reference image: {exc}", "invalid_argument")
-                    suffix = _MIME_TO_SUFFIX.get(mime, ".png")
-                    with tempfile.NamedTemporaryFile(
-                        prefix="hermes-image-ref-", suffix=suffix, delete=False
-                    ) as tmp_file:
-                        tmp_path = Path(tmp_file.name)
-                        tmp_file.write(raw_bytes)
-                    if os.name != "nt":
-                        tmp_path.chmod(0o600)
-                    tmp_files.append(tmp_path)
-                    valid_ref, ref_err, added_cost = self._runner.prepare_media_input(
-                        str(tmp_path),
-                        allow_youtube=False,
-                        mime_type=mime,
-                        inline_budget_used=inline_used,
-                        enforce_cumulative=True,
-                    )
-                else:
-                    try:
-                        _, mime = _load_image_bytes(ref)
-                    except Exception as exc:  # noqa: BLE001
-                        return fail(f"Could not load reference image: {exc}", "invalid_argument")
-                    valid_ref, ref_err, added_cost = self._runner.prepare_media_input(
-                        ref,
-                        allow_youtube=False,
-                        mime_type=mime,
-                        inline_budget_used=inline_used,
-                        enforce_cumulative=True,
-                    )
-
+                valid_ref, ref_err, added_cost = self._runner.prepare_image_input(
+                    ref,
+                    image_loader=_load_image_bytes,
+                    local_mime_sniffer=_sniff_local_image_mime,
+                    mime_to_suffix=_MIME_TO_SUFFIX,
+                    tmp_files=tmp_files,
+                    tmp_prefix="hermes-image-ref-",
+                    inline_budget_used=inline_used,
+                    enforce_cumulative=True,
+                )
                 if ref_err is not None or not valid_ref:
                     return fail(
-                        ref_err.error if ref_err is not None else "Invalid reference image input.",
+                        f"Could not load reference image: {ref_err.error}"
+                        if ref_err is not None
+                        else "Invalid reference image input.",
                         (ref_err.error_type if ref_err is not None else "") or "invalid_argument",
                     )
                 cli_args.extend(["-i", valid_ref])
@@ -671,6 +670,7 @@ def register(ctx) -> None:
             ctx,
             endpoint_resolver=_resolve_endpoint,
             image_loader=_load_image_bytes,
+            local_mime_sniffer=_sniff_local_image_mime,
             user_agent=CLI_USER_AGENT,
             runner=shared_runner,
         )

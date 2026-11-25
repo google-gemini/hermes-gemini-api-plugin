@@ -727,7 +727,7 @@ class GeminiCLIRunner:
         return CLIResult(ok=True, exit_code=0, data=parsed, stdout=stdout, stderr=stderr)
 
     def _validate_local_file(self, raw_path: str) -> Tuple[Optional[Path], Optional[CLIResult]]:
-        """Check *raw_path* against ``raise_if_read_blocked`` and verify it is a regular file."""
+        """Check *raw_path* (and its symlink-resolved target) against ``raise_if_read_blocked``."""
         from agent.file_safety import raise_if_read_blocked
 
         cleaned = (raw_path or "").strip()
@@ -735,14 +735,13 @@ class GeminiCLIRunner:
             return None, CLIResult(ok=False, exit_code=2, error="File path is required.", error_type="invalid_argument")
         try:
             # Check raw string first (catches Windows NT-namespace prefixes before normalization),
-            # then check the absolute path so relative inputs anchor deterministically.
+            # then resolve symlinks so a symlink pointing to a blocked credential file cannot bypass it.
             raise_if_read_blocked(cleaned)
-            abs_str = os.path.abspath(os.path.expanduser(cleaned))
-            raise_if_read_blocked(abs_str)
+            path = Path(os.path.expanduser(cleaned)).resolve()
+            raise_if_read_blocked(str(path))
         except Exception as exc:  # noqa: BLE001
             return None, CLIResult(ok=False, exit_code=2, error=str(exc), error_type="invalid_argument")
 
-        path = Path(abs_str)
         if not path.is_file():
             return None, CLIResult(
                 ok=False,
@@ -784,9 +783,25 @@ class GeminiCLIRunner:
         if wait:
             args.append("--wait")
         if display_name and display_name.strip():
-            args.extend(["--display-name", display_name.strip()])
+            dn = display_name.strip()
+            if dn.startswith("-"):
+                return CLIResult(
+                    ok=False,
+                    exit_code=2,
+                    error="display_name cannot start with a dash.",
+                    error_type="invalid_argument",
+                )
+            args.extend(["--display-name", dn])
         if mime_type and mime_type.strip():
-            args.extend(["--mime-type", mime_type.strip()])
+            mt = mime_type.strip()
+            if mt.startswith("-"):
+                return CLIResult(
+                    ok=False,
+                    exit_code=2,
+                    error="mime_type cannot start with a dash.",
+                    error_type="invalid_argument",
+                )
+            args.extend(["--mime-type", mt])
         return self.run(args, positional_args=[str(path)], timeout=timeout, default_timeout=default_timeout)
 
     def prepare_media_input(
@@ -880,3 +895,68 @@ class GeminiCLIRunner:
             return file_name, None, 0
 
         return str(path), None, encoded_cost
+
+    def prepare_image_input(
+        self,
+        ref: str,
+        *,
+        image_loader: Callable[[str], Tuple[bytes, str]],
+        local_mime_sniffer: Optional[Callable[[str], str]] = None,
+        mime_to_suffix: Dict[str, str],
+        tmp_files: List[Path],
+        tmp_prefix: str = "hermes-image-ref-",
+        inline_budget_used: int = 0,
+        enforce_cumulative: bool = False,
+    ) -> Tuple[Optional[str], Optional[CLIResult], int]:
+        """Resolve a ``files/<id>``, remote URL, data URI, or local image path for ``gemini-api -i``.
+
+        Remote URLs and data URIs are written to ``0o600`` temporary files appended to *tmp_files*
+        for caller cleanup. Local image paths use *local_mime_sniffer* (when provided) so only the
+        leading header bytes are read instead of buffering up to 25 MB in memory.
+        """
+        cleaned = (ref or "").strip()
+        if cleaned.startswith("files/"):
+            return self.prepare_media_input(
+                cleaned,
+                allow_youtube=False,
+                inline_budget_used=inline_budget_used,
+                enforce_cumulative=enforce_cumulative,
+            )
+        if cleaned.lower().startswith(("http://", "https://", "data:")):
+            try:
+                raw_bytes, mime = image_loader(cleaned)
+            except Exception as exc:  # noqa: BLE001
+                return (
+                    None,
+                    CLIResult(ok=False, exit_code=2, error=str(exc), error_type="invalid_argument"),
+                    0,
+                )
+            suffix = mime_to_suffix.get(mime, ".png")
+            with tempfile.NamedTemporaryFile(prefix=tmp_prefix, suffix=suffix, delete=False) as tmp_file:
+                tmp_path = Path(tmp_file.name)
+                tmp_file.write(raw_bytes)
+            if os.name != "nt":
+                tmp_path.chmod(0o600)
+            tmp_files.append(tmp_path)
+            return self.prepare_media_input(
+                str(tmp_path),
+                allow_youtube=False,
+                mime_type=mime,
+                inline_budget_used=inline_budget_used,
+                enforce_cumulative=enforce_cumulative,
+            )
+        try:
+            mime = local_mime_sniffer(cleaned) if local_mime_sniffer is not None else image_loader(cleaned)[1]
+        except Exception as exc:  # noqa: BLE001
+            return (
+                None,
+                CLIResult(ok=False, exit_code=2, error=str(exc), error_type="invalid_argument"),
+                0,
+            )
+        return self.prepare_media_input(
+            cleaned,
+            allow_youtube=False,
+            mime_type=mime,
+            inline_budget_used=inline_budget_used,
+            enforce_cumulative=enforce_cumulative,
+        )
